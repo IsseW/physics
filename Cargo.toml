@@ -8,5 +8,10 @@ edition = "2021"
 [dependencies]
 bevy = "0.7"
 rand = "*"
-itertools = "*"
 bevy_pancam = "0.3.0"
+rayon = "*"
+
+profiling = { version = "1.0.1", default-features = false, optional = true }
+
+[features]
+tracy = ["profiling", "profiling/profile-with-tracy"]

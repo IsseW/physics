@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_pancam::{PanCam, PanCamPlugin};
-use itertools::Itertools;
 use rand::Rng;
+use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
 #[derive(Clone)]
 enum Material {
@@ -58,170 +58,162 @@ impl Object {
     }
 }
 
-type Grid = Vec<Vec<Vec<Object>>>;
+enum Gravity {
+    Dir(Vec2),
+    Towards { point: Vec2, strength: f32 },
+    Away { point: Vec2, strength: f32 },
+    None,
+}
+
+impl Gravity {
+    #[inline(always)]
+    fn acceleration(&self, pos: Vec2) -> Vec2 {
+        fn towards(point: Vec2, strength: f32, pos: Vec2) -> Vec2 {
+            let axis = point - pos;
+            let sqr_len = axis.length_squared();
+            let len = sqr_len.sqrt();
+            axis * (strength / (sqr_len * len))
+        }
+        match self {
+            Gravity::Dir(dir) => *dir,
+            Gravity::Towards { point, strength } => towards(*point, *strength, pos),
+            Gravity::Away { point, strength } => -towards(*point, *strength, pos),
+            Gravity::None => Vec2::ZERO,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum Bounds {
+    Circle(f32),
+    Rect(Vec2, Vec2),
+    None,
+}
+
+impl Bounds {
+    #[inline(always)]
+    fn random_point(&self, rng: &mut impl Rng, radius: f32) -> Vec2 {
+        match self {
+            Bounds::Circle(r) => {
+                let angle = rng.gen_range(0.0..2.0 * std::f32::consts::PI);
+                let r = rng.gen_range(0.0..r - radius);
+                Vec2::new(angle.cos() * r, angle.sin() * r)
+            }
+            Bounds::Rect(min, max) => {
+                let x = rng.gen_range(min.x + radius..max.x - radius);
+                let y = rng.gen_range(min.y + radius..max.y - radius);
+                Vec2::new(x, y)
+            }
+            Bounds::None => Vec2::new(0.0, 0.0),
+        }
+    }
+
+    #[inline(always)]
+    fn update_position(&self, obj: &mut Object) {
+        match self {
+            Bounds::Circle(r) => {
+                let l = obj.pos.length();
+                if l > r - obj.radius {
+                    obj.pos = obj.pos / l * (r - obj.radius);
+                }
+            }
+            Bounds::Rect(min, max) => {
+                let r = Vec2::splat(obj.radius);
+                obj.pos = obj.pos.clamp(*min + r, *max - r);
+            }
+            Bounds::None => {}
+        }
+    }
+}
 
 struct PhysWorld {
-    grid_a: Grid,
-    grid_b: Grid,
-    current_grid: bool,
-    tile_size: f32,
-    width: usize,
-    height: usize,
+    objects: Vec<Object>,
+    gravity: Gravity,
+    bounds: Bounds,
 }
 
 impl PhysWorld {
-    fn new(width: usize, height: usize, tile_size: f32) -> Self {
-        let grid = vec![vec![vec![]; width]; height];
+    fn new(gravity: Gravity, bounds: Bounds) -> Self {
         Self {
-            grid_a: grid.clone(),
-            grid_b: grid,
-            current_grid: false,
-            tile_size,
-            width,
-            height,
-        }
-    }
-    fn grid(&self) -> &Grid {
-        if self.current_grid {
-            &self.grid_a
-        } else {
-            &self.grid_b
-        }
-    }
-    fn grid_mut(&mut self) -> &mut Grid {
-        if self.current_grid {
-            &mut self.grid_a
-        } else {
-            &mut self.grid_b
-        }
-    }
-    fn ngrid(&mut self) -> &Grid {
-        if self.current_grid {
-            &self.grid_b
-        } else {
-            &self.grid_a
-        }
-    }
-    fn ngrid_mut(&mut self) -> &mut Grid {
-        if self.current_grid {
-            &mut self.grid_b
-        } else {
-            &mut self.grid_a
+            objects: Vec::new(),
+            gravity,
+            bounds,
         }
     }
 
-    fn grids_mut(&mut self) -> (&mut Grid, &mut Grid) {
-        if self.current_grid {
-            (&mut self.grid_a, &mut self.grid_b)
-        } else {
-            (&mut self.grid_b, &mut self.grid_a)
-        }
-    }
     fn spawn_random(&mut self, rng: &mut impl Rng) {
-        let x = rng.gen_range(0.0..self.width as f32);
-        let y = rng.gen_range(0.0..self.height as f32);
-        let pos = Vec2::new(x, y) * self.tile_size;
-        let material = match rng.gen_range(0..1) {
+        let material = match rng.gen_range(0..40) {
             0 => Material::Metal,
             1 => Material::Wood,
             _ => Material::Water,
         };
-        self.grid_mut()[y as usize][x as usize].push(Object {
+        let radius = match material {
+            Material::Metal | Material::Wood => rng.gen_range(4.0..8.0),
+            Material::Water => 1.5,
+        };
+        let pos = self.bounds.random_point(rng, radius);
+        self.objects.push(Object {
             pos,
             pos_old: pos,
             acceleration: Vec2::ZERO,
-            radius: match material {
-                Material::Metal | Material::Wood => rng.gen_range(4.0..8.0),
-                Material::Water => 0.5,
-            },
+            radius,
             material,
             binding: None,
         });
     }
 
-    fn all(&self) -> impl Iterator<Item = &Object> {
-        self.grid()
-            .iter()
-            .flat_map(|r| r.iter())
-            .flat_map(|c| c.iter())
-    }
-
-    fn all_mut(&mut self) -> impl Iterator<Item = &mut Object> {
-        self.grid_mut()
-            .iter_mut()
-            .flat_map(|r| r.iter_mut())
-            .flat_map(|c| c.iter_mut())
-    }
-
-    fn update_positions(&mut self, mut updater: impl FnMut((usize, usize), &mut Object)) {
-        let tile_size = self.tile_size;
-        let (width, height) = (self.width, self.height);
-        let (curr, next) = self.grids_mut();
-        for (y, x) in (0..height).flat_map(|y| (0..width).map(move |x| (x, y))) {
-            for mut obj in curr[y][x].drain(0..) {
-                updater((x, y), &mut obj);
-                let n_x = ((obj.pos.x / tile_size).max(0.0) as usize).min(width - 1);
-                let n_y = ((obj.pos.y / tile_size).max(0.0) as usize).min(height - 1);
-                next[n_y][n_x].push(obj);
-            }
-        }
-        self.current_grid = !self.current_grid;
-    }
-
     fn tick(&mut self, dt: f32) {
-        let gravity = Vec2::new(0.0, -500.0);
-
         // Handle gravity
-        self.all_mut().for_each(|obj| obj.accelerate(gravity));
+        {
+            #[cfg(feature = "tracy")]
+            profiling::scope!("gravity");
+            self.objects
+                .iter_mut()
+                .for_each(|obj| obj.accelerate(self.gravity.acceleration(obj.pos)));
+        }
 
         // Handle bounds
-        let size = Vec2::new(self.width as f32, self.height as f32) * self.tile_size;
-        self.update_positions(|_, obj| {
-            let diff = obj.pos - size / 2.0;
-            let dist = diff.length();
-            if dist > size.x / 2.0 - obj.radius {
-                obj.pos = size / 2.0 + diff.normalize() * (size.x / 2.0 - obj.radius);
-            }
-            // let r = Vec2::splat(obj.radius);
-            // obj.pos = obj.pos.clamp(r, size - r);
-        });
+        {
+            #[cfg(feature = "tracy")]
+            profiling::scope!("bounds");
+            self.objects.iter_mut().for_each(|obj| {
+                self.bounds.update_position(obj);
+            });
+        }
 
         // Handle collisions
-        let tile_size = self.tile_size;
-        let (width, height) = (self.width, self.height);
-        for (y0, x0) in (0..height).flat_map(|y| (0..width).map(move |x| (x, y))) {
-            for i in 0..self.grid()[y0][x0].len() {
-                let dc = (self.grid()[y0][x0][i].radius * 2.0 / tile_size).ceil() as usize;
-                for (y1, x1) in (y0.saturating_sub(dc)..y0.saturating_add(dc).min(height))
-                    .cartesian_product(x0.saturating_sub(dc)..x0.saturating_add(dc).min(width))
-                {
-                    for j in 0..self.grid()[y1][x1].len() {
-                        if i == j && x0 == x1 && y0 == y1 {
-                            continue;
-                        }
-                        let o0 = &self.grid()[y0][x0][i];
-                        let o1 = &self.grid()[y1][x1][j];
+        {
+            #[cfg(feature = "tracy")]
+            profiling::scope!("collisions");
+            for i in 0..self.objects.len() {
+                for j in 0..self.objects.len() {
+                    let o0 = &self.objects[i];
+                    let o1 = &self.objects[j];
 
-                        let collision_axis = o0.pos - o1.pos;
-                        let dist = collision_axis.length();
-                        let combined = o0.radius + o1.radius;
-                        if dist < combined {
-                            let n = collision_axis / dist;
-                            let delta = combined - dist;
-                            let w0 = o0.mass();
-                            let w1 = o1.mass();
-                            self.grid_mut()[y0][x0][i].pos += (w1 / (w0 + w1)) * delta * n;
-                            self.grid_mut()[y1][x1][j].pos -= (w0 / (w0 + w1)) * delta * n;
-                        }
+                    let collision_axis = o0.pos - o1.pos;
+                    let combined = o0.radius + o1.radius;
+                    let dist_sqr = collision_axis.length_squared();
+                    if i != j && dist_sqr < combined * combined {
+                        let dist = dist_sqr.sqrt();
+                        let n = collision_axis / dist;
+                        let delta = combined - dist;
+                        let w0 = o0.mass();
+                        let w1 = o1.mass();
+                        self.objects[i].pos += (w1 / (w0 + w1)) * delta * n;
+                        self.objects[j].pos -= (w0 / (w0 + w1)) * delta * n;
                     }
                 }
             }
         }
 
         // Update positions
-        self.update_positions(|_, o| {
-            o.update_position(dt);
-        });
+        {
+            #[cfg(feature = "tracy")]
+            profiling::scope!("update");
+            self.objects.iter_mut().for_each(|obj| {
+                obj.update_position(dt);
+            });
+        }
     }
 }
 
@@ -229,9 +221,9 @@ struct Circle(Handle<Image>);
 
 fn load_system(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(Circle(asset_server.load("circle.png")));
-    const COUNT: usize = 500;
+    const COUNT: usize = 2000;
     commands.insert_resource({
-        let mut world = PhysWorld::new(100, 100, 4.0);
+        let mut world = PhysWorld::new(Gravity::Dir(Vec2::new(0.0, -400.0)), Bounds::Circle(200.0));
         let mut rng = rand::thread_rng();
         for _ in 0..COUNT {
             world.spawn_random(&mut rng);
@@ -245,6 +237,8 @@ fn load_system(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 fn physics_system(mut phys_world: ResMut<PhysWorld>, time: Res<Time>) {
+    #[cfg(feature = "tracy")]
+    profiling::scope!("physics system");
     let sub_steps = 8;
     let dt = time.delta_seconds() / sub_steps as f32;
     for _ in 0..sub_steps {
@@ -258,7 +252,9 @@ fn extract_system(
     mut objects: Query<&mut Transform>,
     circle: Res<Circle>,
 ) {
-    world.all_mut().for_each(|o| {
+    #[cfg(feature = "tracy")]
+    profiling::scope!("extract system");
+    world.objects.iter_mut().for_each(|o| {
         if let Some(Ok(mut transform)) = o.binding.map(|e| objects.get_mut(e)) {
             transform.translation = Vec3::new(o.pos.x, o.pos.y, transform.translation.z);
             transform.scale = Vec3::splat(o.radius * 2.0);
