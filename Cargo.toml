@@ -8,10 +8,16 @@ edition = "2021"
 [dependencies]
 bevy = "0.7"
 rand = "*"
-bevy_pancam = "0.3.0"
+bevy_pancam = "0.3"
 rayon = "*"
+itertools = "*"
+bevy_egui = "0.14"
 
 profiling = { version = "1.0.1", default-features = false, optional = true }
 
+massi = { path = "../math/massi", optional = true }
+
 [features]
+default = ["math"]
 tracy = ["profiling", "profiling/profile-with-tracy"]
+math = ["massi/cranelift"]
