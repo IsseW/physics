@@ -1,4 +1,6 @@
 #![feature(let_chains)]
+mod for_pairs;
+
 use std::num::NonZeroU32;
 
 use bevy::{
@@ -7,7 +9,7 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::{
-    egui::{self, panel::Side, DragValue, Rgba},
+    egui::{self, panel::Side, Rgba},
     EguiContext, EguiPlugin,
 };
 use bevy_pancam::{PanCam, PanCamPlugin};
@@ -17,12 +19,12 @@ use massi::{
     Identifier,
 };
 use rand::Rng;
-use rayon::iter::{
-    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
-};
+use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
 #[cfg(feature = "math")]
 use massi::Expr;
+
+use crate::for_pairs::ForPairs;
 
 fn main() {
     App::new()
@@ -30,21 +32,24 @@ fn main() {
         .add_plugin(EguiPlugin)
         .add_plugin(FrameTimeDiagnosticsPlugin)
         .add_plugin(PanCamPlugin)
-        .init_resource::<PhysWorld>()
+        .init_resource::<PhysSettings>()
         .insert_resource(ClearColor(Color::BLACK))
         .add_startup_system(load_system)
         .add_system(physics_system)
+        .add_system(update_position_system)
+        .add_system(update_visuals_system)
         .add_system(input_system)
-        .add_system(extract_system)
         .add_system(ui)
         .run();
 }
 
+#[cfg(feature = "math")]
 enum ExprRes {
     Expr(Expr),
     Error(Vec<Error<Full>>),
 }
 
+#[cfg(feature = "math")]
 impl Default for ExprRes {
     fn default() -> Self {
         Self::Expr(Expr::empty())
@@ -53,15 +58,20 @@ impl Default for ExprRes {
 
 #[derive(Default)]
 struct State {
+    #[cfg(feature = "math")]
     expr_x: ExprRes,
+    #[cfg(feature = "math")]
     x_compile_err: Option<ModuleError>,
+    #[cfg(feature = "math")]
     expr_y: ExprRes,
+    #[cfg(feature = "math")]
     y_compile_err: Option<ModuleError>,
 }
 
 fn ui(
+    mut objects: Query<&mut ObjectPos>,
     mut egui_context: ResMut<EguiContext>,
-    mut world: ResMut<PhysWorld>,
+    mut settings: ResMut<PhysSettings>,
     diagnostics: Res<Diagnostics>,
     mut state: Local<State>,
 ) {
@@ -83,7 +93,7 @@ fn ui(
     egui::SidePanel::new(Side::Left, "settings").show(egui_context.ctx_mut(), |ui| {
         ui.heading("Settings");
 
-        let mut curr = world.bounds.as_str();
+        let mut curr = settings.bounds.as_str();
         egui::ComboBox::from_label("Bounds")
             .selected_text(curr)
             .show_ui(ui, |ui| {
@@ -92,9 +102,9 @@ fn ui(
                 ui.selectable_value(&mut curr, "None", "None");
             });
 
-        world.bounds = Bounds::from_str(curr, world.bounds.clone());
+        settings.bounds = Bounds::from_str(curr, settings.bounds.clone());
 
-        match &mut world.bounds {
+        match &mut settings.bounds {
             Bounds::Circle(radius) => {
                 scalar(ui, "Radius", radius);
                 *radius = radius.max(0.0);
@@ -108,7 +118,7 @@ fn ui(
             Bounds::None => {}
         }
 
-        let mut curr = world.gravity.as_str();
+        let mut curr = settings.gravity.as_str();
         egui::ComboBox::from_label("Gravity")
             .selected_text(curr)
             .show_ui(ui, |ui| {
@@ -118,9 +128,9 @@ fn ui(
                 ui.selectable_value(&mut curr, "Vector Field", "Vector Field");
                 ui.selectable_value(&mut curr, "None", "None");
             });
-        world.gravity = Gravity::from_str(curr, world.gravity.clone());
+        settings.gravity = Gravity::from_str(curr, settings.gravity.clone());
 
-        match &mut world.gravity {
+        match &mut settings.gravity {
             Gravity::Dir(dir) => {
                 vector(ui, "Dir", dir);
             }
@@ -144,9 +154,6 @@ fn ui(
                                 *ex = ExprRes::Error(e);
                             }
                         }
-                    }
-                    if !res.has_focus() && let ExprRes::Expr(ex) = ex {
-                        *expr = format!("{ex}");
                     }
                     if let ExprRes::Error(e) = ex {
                         for e in e {
@@ -189,21 +196,23 @@ fn ui(
         }
 
         ui.label("Gravitational Constant");
-        ui.add(egui::DragValue::new(&mut world.gravitational_constant));
+        ui.add(egui::DragValue::new(&mut settings.gravitational_constant));
+
+        ui.checkbox(&mut settings.collisions, "Collisions");
 
         if ui.button("Stop All").clicked() {
-            world.objects.iter_mut().for_each(|o| o.pos_old = o.pos);
+            objects.iter_mut().for_each(|mut o| o.old = o.current);
         }
         ui.horizontal(|ui| {
             ui.label("Sub Steps");
-            let mut value = u32::from(world.sub_steps);
+            let mut value = u32::from(settings.sub_steps);
             ui.add(egui::Slider::new(&mut value, 1..=32));
             if let Some(value) = NonZeroU32::new(value) {
-                world.sub_steps = value;
+                settings.sub_steps = value;
             }
         });
 
-        ui.label(format!("Bodies: {}", world.objects.len()));
+        ui.label(format!("Bodies: {}", objects.iter().count()));
 
         let fps_diags = diagnostics
             .get(FrameTimeDiagnosticsPlugin::FPS)
@@ -215,8 +224,8 @@ fn ui(
 }
 
 fn load_system(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.insert_resource(Circle(asset_server.load("circle.png")));
-
+    let image = asset_server.load("../assets/circle.png");
+    commands.insert_resource(Circle(image));
     commands
         .spawn_bundle(OrthographicCameraBundle::new_2d())
         .insert(PanCam {
@@ -225,7 +234,7 @@ fn load_system(mut commands: Commands, asset_server: Res<AssetServer>) {
         });
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 enum Material {
     Metal,
     Wood,
@@ -236,7 +245,7 @@ enum Material {
 impl Material {
     fn color(&self) -> Color {
         match self {
-            Material::Metal => Color::GRAY,
+            Material::Metal => Color::WHITE,
             Material::Wood => Color::BEIGE,
             Material::Water => Color::BLUE,
             Material::BlackHole => Color::rgb(0.18, 0.1, 0.2),
@@ -253,34 +262,87 @@ impl Material {
     }
 }
 
-#[derive(Clone)]
+#[derive(Component)]
+struct ObjectPos {
+    current: DVec2,
+    old: DVec2,
+}
+
+impl ObjectPos {
+    fn apply(&mut self, obj: PhysObject) {
+        self.current = obj.pos;
+        self.old = obj.pos_old;
+    }
+}
+
+#[derive(Component)]
 struct Object {
+    material: Material,
+    radius: f64,
+}
+
+#[derive(Bundle)]
+struct ObjectBundle {
+    object: Object,
+    pos: ObjectPos,
+    pub sprite: Sprite,
+    pub transform: Transform,
+    pub global_transform: GlobalTransform,
+    pub texture: Handle<Image>,
+    /// User indication of whether an entity is visible
+    pub visibility: Visibility,
+}
+
+impl ObjectBundle {
+    fn new(pos: DVec2, material: Material, radius: f64, image: Handle<Image>) -> Self {
+        Self {
+            object: Object { material, radius },
+            pos: ObjectPos {
+                current: pos,
+                old: pos,
+            },
+            sprite: Sprite {
+                color: material.color(),
+                custom_size: Some(Vec2::ONE),
+                ..default()
+            },
+            transform: Transform {
+                translation: Vec3::new(pos.x as f32, pos.y as f32, 0.0),
+                scale: Vec3::splat(radius as f32 * 2.0),
+                ..default()
+            },
+            texture: image,
+            global_transform: Default::default(),
+            visibility: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PhysObject {
     pos: DVec2,
     pos_old: DVec2,
     acceleration: DVec2,
-
     radius: f64,
-
-    // This is dependendant on material and radius
     mass: f64,
-
-    // Should not change during the lifetime of an object.
-    material: Material,
-    binding: Option<Entity>,
 }
 
-impl Object {
-    fn new(pos: DVec2, radius: f64, material: Material) -> Self {
-        let mass = radius * radius * material.density() * std::f64::consts::PI;
-        Self {
-            pos,
-            pos_old: pos,
+impl From<(&Object, &ObjectPos)> for PhysObject {
+    fn from((obj, pos): (&Object, &ObjectPos)) -> Self {
+        PhysObject {
+            pos: pos.current,
+            pos_old: pos.old,
             acceleration: DVec2::ZERO,
-            radius,
-            mass,
-            material,
-            binding: None,
+            radius: obj.radius,
+            mass: obj.radius * obj.radius * obj.material.density() * std::f64::consts::PI,
         }
+    }
+}
+
+impl PhysObject {
+    #[inline(always)]
+    fn has_changed(&self) -> bool {
+        self.pos != self.pos_old
     }
 
     #[inline(always)]
@@ -421,7 +483,7 @@ impl Bounds {
     }
 
     #[inline(always)]
-    fn update_position(&self, obj: &mut Object) {
+    fn update_position(&self, obj: &mut PhysObject) {
         match self {
             Bounds::Circle(r) => {
                 let l = obj.pos.length();
@@ -467,145 +529,22 @@ impl Bounds {
     }
 }
 
-struct PhysWorld {
-    objects: Vec<Object>,
+struct PhysSettings {
     gravity: Gravity,
     bounds: Bounds,
     gravitational_constant: f64,
     sub_steps: NonZeroU32,
+    collisions: bool,
 }
 
-impl Default for PhysWorld {
+impl Default for PhysSettings {
     fn default() -> Self {
         Self {
-            objects: Default::default(),
             gravity: Gravity::None,
             bounds: Bounds::None,
             gravitational_constant: Default::default(),
             sub_steps: NonZeroU32::new(1).unwrap(),
-        }
-    }
-}
-
-impl PhysWorld {
-    fn for_pairs<T: Send>(
-        &mut self,
-        map: impl Fn(&Object, &Object) -> Option<(T, T)> + Sync,
-        mut func: impl FnMut(&mut Object, T),
-    ) {
-        self.objects
-            .par_iter()
-            .enumerate()
-            .map(|(i, o0)| {
-                self.objects[i + 1..]
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(j, o1)| map(o0, o1).map(|(a, b)| ((i, a), (i + 1 + j, b))))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flat_map(|v| v.into_iter())
-            .for_each(|((i, a), (j, b))| {
-                func(&mut self.objects[i], a);
-                func(&mut self.objects[j], b);
-            });
-    }
-
-    #[inline(always)]
-    fn tick(&mut self, dt: f64) {
-        #[cfg(feature = "tracy")]
-        profiling::scope!("physics system");
-        let sub_steps = u32::from(self.sub_steps);
-        let dt = dt / sub_steps as f64;
-        for _ in 0..sub_steps {
-            #[cfg(feature = "tracy")]
-            profiling::scope!("tick");
-            // Handle gravity
-            {
-                #[cfg(feature = "tracy")]
-                profiling::scope!("gravity");
-
-                if self.gravitational_constant.abs() > f64::EPSILON {
-                    let constant = self.gravitational_constant;
-                    // self.for_pairs(
-                    //     |a, b| {
-                    //         let axis = a.pos - b.pos;
-                    //         let sqr_len = axis.length_squared();
-                    //         let n = axis * (constant / sqr_len / sqr_len.sqrt());
-                    //         Some((n * b.mass, n * -a.mass))
-                    //     },
-                    //     |o, t| {
-                    //         o.accelerate(t);
-                    //     },
-                    // );
-                    let objects = self.objects.clone();
-                    self.objects.par_iter_mut().for_each(|a| {
-                        let v = objects
-                            .iter()
-                            .map(|b| {
-                                let axis = b.pos - a.pos;
-                                let sqr_len = axis.length_squared();
-                                if sqr_len == 0.0 {
-                                    DVec2::ZERO
-                                } else {
-                                    axis * (b.mass * constant / sqr_len / sqr_len.sqrt())
-                                }
-                            })
-                            .reduce(|a, b| a + b)
-                            .unwrap_or_default();
-                        a.accelerate(v);
-                    });
-                }
-                self.objects
-                    .iter_mut()
-                    .for_each(|obj| obj.accelerate(self.gravity.acceleration(obj.pos)));
-            }
-
-            // Handle bounds
-            {
-                #[cfg(feature = "tracy")]
-                profiling::scope!("bounds");
-                self.objects.iter_mut().for_each(|obj| {
-                    self.bounds.update_position(obj);
-                });
-            }
-
-            // Handle collisions
-            {
-                #[cfg(feature = "tracy")]
-                profiling::scope!("collisions");
-                self.for_pairs(
-                    |a, b| {
-                        let collision_axis = a.pos - b.pos;
-                        let combined = a.radius + b.radius;
-                        let dist_sqr = collision_axis.length_squared();
-                        if dist_sqr < combined * combined {
-                            let dist = dist_sqr.sqrt();
-                            let n = collision_axis / dist;
-                            let delta = combined - dist;
-                            Some((
-                                (b.mass / (a.mass + b.mass) * delta) * n,
-                                -(a.mass / (a.mass + b.mass) * delta) * n,
-                            ))
-                        } else {
-                            None
-                        }
-                    },
-                    |o, t| {
-                        o.pos += t;
-                    },
-                );
-            }
-
-            // Update positions
-            {
-                #[cfg(feature = "tracy")]
-                profiling::scope!("update");
-                self.objects.iter_mut().for_each(|obj| {
-                    obj.update_position(dt);
-                });
-            }
+            collisions: true,
         }
     }
 }
@@ -613,10 +552,12 @@ impl PhysWorld {
 struct Circle(Handle<Image>);
 
 fn input_system(
-    mut phys_world: ResMut<PhysWorld>,
+    mut commands: Commands,
+    mut phys_world: ResMut<PhysSettings>,
     input: Res<Input<KeyCode>>,
     windows: Res<Windows>,
     camera: Query<(&Camera, &GlobalTransform)>,
+    circle: Res<Circle>,
 ) {
     if let Some(window) = windows.get_primary() && let Some(position) = window.cursor_position() {
         // cursor is inside the window, position given
@@ -628,14 +569,10 @@ fn input_system(
             .as_dvec2();
             let mut rng = rand::thread_rng();
             if input.pressed(KeyCode::Space) {
-                phys_world
-                    .objects
-                    .push(Object::new(pos, rng.gen_range(4.0..10.0), Material::Metal))
+                commands.spawn_bundle(ObjectBundle::new(pos, Material::Metal, rng.gen_range(4.0..10.0), circle.0.clone()));
             }
             if input.just_pressed(KeyCode::B) {
-                phys_world
-                    .objects
-                    .push(Object::new(pos, rng.gen_range(400.0..1000.0), Material::BlackHole))
+                commands.spawn_bundle(ObjectBundle::new(pos, Material::BlackHole, rng.gen_range(400.0..1000.0), circle.0.clone()));
             }
             if input.pressed(KeyCode::G) {
                 phys_world.gravity = Gravity::Towards {
@@ -651,41 +588,141 @@ fn input_system(
     }
 }
 
-fn physics_system(mut phys_world: ResMut<PhysWorld>, time: Res<Time>) {
-    phys_world.tick(time.delta_seconds_f64());
-}
-
-fn extract_system(
-    mut commands: Commands,
-    mut world: ResMut<PhysWorld>,
-    mut objects: Query<&mut Transform>,
-    circle: Res<Circle>,
+fn physics_system(
+    mut objects: Query<(&Object, &mut ObjectPos)>,
+    settings: Res<PhysSettings>,
+    time: Res<Time>,
 ) {
     #[cfg(feature = "tracy")]
-    profiling::scope!("extract system");
-    world.objects.iter_mut().for_each(|o| {
-        if let Some(Ok(mut transform)) = o.binding.map(|e| objects.get_mut(e)) {
-            transform.translation =
-                Vec3::new(o.pos.x as f32, o.pos.y as f32, transform.translation.z);
-            transform.scale = Vec3::splat(o.radius as f32 * 2.0);
-        } else {
-            let e = commands
-                .spawn_bundle(SpriteBundle {
-                    sprite: Sprite {
-                        color: o.material.color(),
-                        custom_size: Some(Vec2::ONE),
-                        ..default()
-                    },
-                    transform: Transform {
-                        translation: Vec3::new(o.pos.x as f32, o.pos.y as f32, 0.0),
-                        scale: Vec3::splat(o.radius as f32 * 2.0),
-                        ..default()
-                    },
-                    texture: circle.0.clone(),
-                    ..default()
-                })
-                .id();
-            o.binding = Some(e);
+    profiling::scope!("physics system");
+
+    let mut objs = {
+        #[cfg(feature = "tracy")]
+        profiling::scope!("extract");
+
+        objects
+            .iter()
+            .map(|o| PhysObject::from(o))
+            .collect::<Vec<_>>()
+    };
+
+    let sub_steps = u32::from(settings.sub_steps);
+    let dt = time.delta_seconds_f64() / sub_steps as f64;
+    for _ in 0..sub_steps {
+        #[cfg(feature = "tracy")]
+        profiling::scope!("tick");
+        // Handle gravity
+        {
+            #[cfg(feature = "tracy")]
+            profiling::scope!("gravity");
+
+            if settings.gravitational_constant.abs() > f64::EPSILON {
+                let constant = settings.gravitational_constant;
+
+                let objects = objs.clone();
+                objs.par_iter_mut().for_each(|a| {
+                    let v = objects
+                        .iter()
+                        .map(|b| {
+                            let axis = b.pos - a.pos;
+                            let sqr_len = axis.length_squared();
+                            if sqr_len == 0.0 {
+                                DVec2::ZERO
+                            } else {
+                                axis * (b.mass * constant / sqr_len / sqr_len.sqrt())
+                            }
+                        })
+                        .reduce(|a, b| a + b)
+                        .unwrap_or_default();
+                    a.accelerate(v);
+                });
+            }
+            if !matches!(settings.gravity, Gravity::None) {
+                objs.iter_mut()
+                    .for_each(|obj| obj.accelerate(settings.gravity.acceleration(obj.pos)));
+            }
         }
-    })
+
+        // Handle bounds
+        if !matches!(settings.bounds, Bounds::None) {
+            #[cfg(feature = "tracy")]
+            profiling::scope!("bounds");
+            objs.iter_mut().for_each(|obj| {
+                settings.bounds.update_position(obj);
+            });
+        }
+
+        // Handle collisions
+        if settings.collisions {
+            #[cfg(feature = "tracy")]
+            profiling::scope!("collisions");
+
+            objs.par_for_pairs(
+                |a, b| {
+                    let collision_axis = a.pos - b.pos;
+                    let combined = a.radius + b.radius;
+                    let dist_sqr = collision_axis.length_squared();
+                    if dist_sqr < combined * combined {
+                        let dist = dist_sqr.sqrt();
+                        let n = collision_axis / dist;
+                        let delta = combined - dist;
+                        Some((
+                            (b.mass / (a.mass + b.mass) * delta) * n,
+                            -(a.mass / (a.mass + b.mass) * delta) * n,
+                        ))
+                    } else {
+                        None
+                    }
+                },
+                |o, t| {
+                    o.pos += t;
+                },
+            );
+        }
+
+        // Update positions
+        {
+            #[cfg(feature = "tracy")]
+            profiling::scope!("update");
+            objs.iter_mut().for_each(|obj| {
+                obj.update_position(dt);
+            });
+        }
+    }
+
+    {
+        #[cfg(feature = "tracy")]
+        profiling::scope!("insert");
+        objects
+            .iter_mut()
+            .zip(objs.into_iter())
+            .for_each(|((_, mut p), obj)| {
+                if obj.has_changed() {
+                    p.apply(obj);
+                }
+            })
+    }
+}
+
+fn update_position_system(mut positions: Query<(&ObjectPos, &mut Transform), Changed<ObjectPos>>) {
+    #[cfg(feature = "tracy")]
+    profiling::scope!("update position system");
+    positions.for_each_mut(|(pos, mut transform)| {
+        transform.translation = Vec3::new(
+            pos.current.x as f32,
+            pos.current.y as f32,
+            transform.translation.z,
+        );
+    });
+}
+
+fn update_visuals_system(
+    mut objects: Query<(&Object, &mut Transform, &mut Sprite), Changed<Object>>,
+) {
+    #[cfg(feature = "tracy")]
+    profiling::scope!("update visuals system");
+    objects.for_each_mut(|(obj, mut transform, mut sprite)| {
+        sprite.color = obj.material.color();
+        transform.scale = Vec3::splat(obj.radius as f32 * 2.0);
+    });
 }
