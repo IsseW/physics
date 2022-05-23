@@ -660,6 +660,11 @@ fn physics_system(
             objs.par_for_pairs(
                 |a, b| {
                     let collision_axis = a.pos - b.pos;
+                    let collision_axis = if collision_axis == DVec2::ZERO {
+                        DVec2::new(f64::EPSILON, f64::EPSILON)
+                    } else {
+                        collision_axis
+                    };
                     let combined = a.radius + b.radius;
                     let dist_sqr = collision_axis.length_squared();
                     if dist_sqr < combined * combined {
