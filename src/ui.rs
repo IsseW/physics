@@ -6,16 +6,19 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::{
-    egui::{self, panel::Side, Rgba},
+    egui::{self, panel::Side},
     EguiContext,
 };
+#[cfg(feature = "math")]
 use massi::{
     cranelift::{compile, ModuleError},
     parser::{Error, Full},
     Expr, Identifier,
 };
+#[cfg(feature = "math")]
+use bevy_egui::egui::Rgba;
 
-use crate::physics::{Bounds, Gravity, LinkConstraint, ObjectPos, PhysSettings, PointConstraint};
+use crate::{physics::{Bounds, Gravity, LinkConstraint, ObjectPos, PhysSettings, PointConstraint}, PlacementSettings};
 
 #[cfg(feature = "math")]
 enum ExprRes {
@@ -49,6 +52,7 @@ pub fn ui(
     points: Query<(Entity, &PointConstraint<Entity>)>,
     mut egui_context: ResMut<EguiContext>,
     mut settings: ResMut<PhysSettings>,
+    mut placement: ResMut<PlacementSettings>,
     diagnostics: Res<Diagnostics>,
     mut state: Local<State>,
 ) {
@@ -102,7 +106,6 @@ pub fn ui(
             .selected_text(curr)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut curr, "Dir", "Dir");
-                ui.selectable_value(&mut curr, "Towards", "Towards");
                 #[cfg(feature = "math")]
                 ui.selectable_value(&mut curr, "Vector Field", "Vector Field");
                 ui.selectable_value(&mut curr, "None", "None");
@@ -112,10 +115,6 @@ pub fn ui(
         match &mut settings.gravity {
             Gravity::Dir(dir) => {
                 vector(ui, "Dir", dir);
-            }
-            Gravity::Towards { point, strength } => {
-                vector(ui, "Point", point);
-                scalar(ui, "Strength", strength);
             }
             Gravity::None => {}
             #[cfg(feature = "math")]
@@ -177,6 +176,7 @@ pub fn ui(
         ui.label("Gravitational Constant");
         ui.add(egui::DragValue::new(&mut settings.gravitational_constant));
 
+        ui.checkbox(&mut settings.gravity_set_velocity, "Set Velocity");
         ui.checkbox(&mut settings.collisions, "Collisions");
 
         if ui.button("Stop All").clicked() {
@@ -202,6 +202,52 @@ pub fn ui(
             }
         });
 
+        ui.heading("Placement");
+        ui.label("Radius");
+        ui.add(egui::Slider::new(&mut placement.radius, 1.0..=4000.0).logarithmic(true));
+        ui.label("Density");
+        ui.add(egui::Slider::new(&mut placement.density, 0.1..=1000.0).logarithmic(true));
+        fn color_edit(ui: &mut egui::Ui, color: &mut Color) -> egui::Response {
+            match *color {
+                Color::Rgba {
+                    red,
+                    green,
+                    blue,
+                    alpha,
+                } => {
+                    let mut rgb = [red, green, blue];
+                    let res = ui.color_edit_button_rgb(&mut rgb);
+                    *color = Color::Rgba {
+                        red: rgb[0],
+                        green: rgb[1],
+                        blue: rgb[2],
+                        alpha,
+                    };
+                    res
+                }
+                Color::Hsla {
+                    hue,
+                    saturation,
+                    lightness,
+                    alpha,
+                } => {
+                    let mut c = egui::color::Hsva::new(hue, saturation, lightness, alpha);
+                    let res = ui.color_edit_button_hsva(&mut c);
+                    *color = Color::Hsla {
+                        hue: c.h,
+                        saturation: c.s,
+                        lightness: c.v,
+                        alpha: c.a,
+                    };
+                    res
+                }
+                _ => todo!(),
+            }
+        }
+        color_edit(ui, &mut placement.color);
+
+        ui.heading("Info");
+        
         ui.label(format!("Bodies: {}", objects.iter().count()));
         ui.label(format!("Links: {}", links.iter().count()));
 

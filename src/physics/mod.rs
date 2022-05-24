@@ -3,24 +3,22 @@ mod object;
 
 use std::num::NonZeroU32;
 
+use self::object::ObjectDensity;
 pub use self::{
     constraints::{LinkConstraint, PointConstraint},
-    object::{Material, Object, ObjectBundle, ObjectPos, PhysObject},
+    object::{Object, ObjectBundle, ObjectPos, PhysObject},
 };
 
-use crate::for_pairs::ForPairs;
+use crate::{for_pairs::ForPairs, physics::constraints::Constraint};
 use bevy::{math::DVec2, prelude::*, utils::HashMap};
+#[cfg(feature = "math")]
 use massi::cranelift::CFunc;
 use rand::Rng;
-use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
+use rayon::{iter::ParallelIterator, slice::ParallelSliceMut};
 
 #[derive(Clone)]
 pub enum Gravity {
     Dir(DVec2),
-    Towards {
-        point: DVec2,
-        strength: f64,
-    },
     #[cfg(feature = "math")]
     VectorField {
         funcs: Option<(CFunc<2>, CFunc<2>)>,
@@ -33,15 +31,8 @@ pub enum Gravity {
 impl Gravity {
     #[inline(always)]
     fn acceleration(&self, pos: DVec2) -> DVec2 {
-        fn towards(point: DVec2, strength: f64, pos: DVec2) -> DVec2 {
-            let axis = point - pos;
-            let sqr_len = axis.length_squared();
-            let len = sqr_len.sqrt();
-            axis * (strength / (sqr_len * len))
-        }
         match self {
             Gravity::Dir(dir) => *dir,
-            Gravity::Towards { point, strength } => towards(*point, *strength, pos),
             // Per object is applied at a later stage
             Gravity::None => DVec2::ZERO,
             #[cfg(feature = "math")]
@@ -59,7 +50,6 @@ impl Gravity {
     pub fn as_str(&self) -> &'static str {
         match self {
             Gravity::Dir(_) => "Dir",
-            Gravity::Towards { .. } => "Towards",
             Gravity::None => "None",
             #[cfg(feature = "math")]
             Gravity::VectorField { .. } => "Vector Field",
@@ -73,16 +63,6 @@ impl Gravity {
                     gravity
                 } else {
                     Gravity::Dir(DVec2::new(0.0, -400.0))
-                }
-            }
-            "Towards" => {
-                if matches!(gravity, Gravity::Towards { .. }) {
-                    gravity
-                } else {
-                    Gravity::Towards {
-                        point: DVec2::new(0.0, 0.0),
-                        strength: 100.0,
-                    }
                 }
             }
             "None" => Gravity::None,
@@ -178,6 +158,7 @@ impl Bounds {
 
 pub struct PhysSettings {
     pub gravity: Gravity,
+    pub gravity_set_velocity: bool,
     pub bounds: Bounds,
     pub gravitational_constant: f64,
     pub sub_steps: NonZeroU32,
@@ -188,6 +169,7 @@ impl Default for PhysSettings {
     fn default() -> Self {
         Self {
             gravity: Gravity::None,
+            gravity_set_velocity: false,
             bounds: Bounds::None,
             gravitational_constant: Default::default(),
             sub_steps: NonZeroU32::new(1).unwrap(),
@@ -198,7 +180,7 @@ impl Default for PhysSettings {
 
 fn physics_system(
     mut commands: Commands,
-    mut objects: Query<(Entity, (&Object, &mut ObjectPos))>,
+    mut objects: Query<(Entity, (&Object, &mut ObjectPos, &ObjectDensity))>,
     links: Query<(Entity, &LinkConstraint<Entity>)>,
     points: Query<(Entity, &PointConstraint<Entity>)>,
     settings: Res<PhysSettings>,
@@ -227,7 +209,7 @@ fn physics_system(
     let links = links
         .iter()
         .filter_map(|(e, l)| {
-            if let Some(link) = l.try_map(|e| entities.get(e).cloned()) && objs[link.a].pos.distance_squared(objs[link.b].pos) < l.snap * l.snap {
+            if let Some(link) = l.try_map(|e| entities.get(e).cloned()) && link.should_stay(|i| objs[*i].pos) {
                 Some(link)
             } else {
                 commands.entity(e).despawn();
@@ -261,26 +243,48 @@ fn physics_system(
                 let constant = settings.gravitational_constant;
 
                 let objects = objs.clone();
-                objs.par_iter_mut().for_each(|a| {
-                    let v = objects
-                        .iter()
-                        .map(|b| {
-                            let axis = b.pos - a.pos;
-                            let sqr_len = axis.length_squared();
-                            if sqr_len == 0.0 {
-                                DVec2::ZERO
+                objs.par_chunks_mut(8).for_each(|chunk| {
+                    if chunk.len() == 8 && false {
+
+                    } else {
+                        for a in chunk {
+                            let v = objects
+                                .iter()
+                                .map(|b| {
+                                    let axis = b.pos - a.pos;
+                                    let sqr_len = axis.length_squared();
+
+                                    if sqr_len == 0.0 {
+                                        DVec2::ZERO
+                                    } else {
+                                        axis * (b.mass * constant / sqr_len / sqr_len.sqrt())
+                                    }
+                                })
+                                .reduce(|a, b| a + b)
+                                .unwrap_or_default();
+                            if settings.gravity_set_velocity {
+                                a.set_velocity(v * dt);
                             } else {
-                                axis * (b.mass * constant / sqr_len / sqr_len.sqrt())
+                                a.accelerate(v);
                             }
-                        })
-                        .reduce(|a, b| a + b)
-                        .unwrap_or_default();
-                    a.accelerate(v);
+                            #[cfg(feature = "panic-nan")]
+                            a.panic_nan("gravity")
+                        }
+                    }
                 });
             }
             if !matches!(settings.gravity, Gravity::None) {
                 objs.iter_mut()
-                    .for_each(|obj| obj.accelerate(settings.gravity.acceleration(obj.pos)));
+                    .for_each(|obj| {
+                    let v = settings.gravity.acceleration(obj.pos);
+                    if settings.gravity_set_velocity {
+                        obj.set_velocity(v * dt);
+                    } else {
+                        obj.accelerate(v);
+                    }
+                #[cfg(feature = "panic-nan")]
+                obj.panic_nan("const gravity");
+            });
             }
         }
 
@@ -290,7 +294,22 @@ fn physics_system(
             profiling::scope!("bounds");
             objs.iter_mut().for_each(|obj| {
                 settings.bounds.update_position(obj);
+                #[cfg(feature = "panic-nan")]
+                obj.panic_nan("bounds");
             });
+        }
+
+        {
+            #[cfg(feature = "tracy")]
+            profiling::scope!("constraints");
+
+            for link in links.iter() {
+                link.apply(&mut objs);
+            }
+
+            for point in points.iter() {
+                point.apply(&mut objs);
+            }
         }
 
         // Handle collisions
@@ -322,34 +341,10 @@ fn physics_system(
                 },
                 |o, t| {
                     o.pos += t;
+                    #[cfg(feature = "panic-nan")]
+                    o.panic_nan("collision");
                 },
             );
-        }
-
-        {
-            #[cfg(feature = "tracy")]
-            profiling::scope!("constraints");
-
-            for link in links.iter() {
-                let axis = objs[link.a].pos - objs[link.b].pos;
-                let dist = axis.length();
-                let n = axis / dist;
-                let delta = link.dist - dist;
-                let a_m = objs[link.a].mass;
-                let b_m = objs[link.b].mass;
-                objs[link.a].pos += n * (delta * b_m / (a_m + b_m));
-                objs[link.b].pos -= n * (delta * a_m / (a_m + b_m));
-            }
-
-            for point in points.iter() {
-                let axis = objs[point.a].pos - point.point;
-                let dist = axis.length();
-                let n = axis / dist;
-                let delta = point.dist - dist;
-                objs[point.a].pos = point.point + n * delta;
-                objs[point.a].pos_old = objs[point.a].pos;
-                objs[point.a].acceleration = DVec2::ZERO;
-            }
         }
 
         // Update positions
@@ -368,8 +363,11 @@ fn physics_system(
         objects
             .iter_mut()
             .zip(objs.into_iter())
-            .for_each(|((_, (_, mut p)), obj)| {
+            .for_each(|((e, (_, mut p, _)), obj)| {
                 if obj.has_changed() {
+                    if obj.pos.is_nan() {
+                        commands.entity(e).despawn();
+                    }
                     p.apply(obj);
                 }
             })

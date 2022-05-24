@@ -1,33 +1,9 @@
 use bevy::{math::DVec2, prelude::*};
 
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-pub enum Material {
-    Metal,
-    Wood,
-    Water,
-    BlackHole,
-}
+use crate::PlacementSettings;
 
-impl Material {
-    fn color(&self) -> Color {
-        match self {
-            Material::Metal => Color::WHITE,
-            Material::Wood => Color::BEIGE,
-            Material::Water => Color::BLUE,
-            Material::BlackHole => Color::rgb(0.18, 0.1, 0.2),
-        }
-    }
-
-    fn density(&self) -> f64 {
-        match self {
-            Material::Metal => 7.874,
-            Material::Wood => 0.1,
-            Material::Water => 1.0,
-            Material::BlackHole => 1000.0,
-        }
-    }
-}
+#[derive(Component)]
+pub struct ObjectDensity(f64);
 
 #[derive(Component)]
 pub struct ObjectPos {
@@ -44,7 +20,7 @@ impl ObjectPos {
 
 #[derive(Component)]
 pub struct Object {
-    pub material: Material,
+    pub color: Color,
     pub radius: f64,
 }
 
@@ -52,6 +28,7 @@ pub struct Object {
 pub struct ObjectBundle {
     object: Object,
     pos: ObjectPos,
+    density: ObjectDensity,
     sprite: Sprite,
     transform: Transform,
     global_transform: GlobalTransform,
@@ -61,21 +38,22 @@ pub struct ObjectBundle {
 }
 
 impl ObjectBundle {
-    pub fn new(pos: DVec2, material: Material, radius: f64, image: Handle<Image>) -> Self {
+    pub fn new(pos: DVec2, settings: &PlacementSettings, image: Handle<Image>) -> Self {
         Self {
-            object: Object { material, radius },
+            object: Object { color: settings.color, radius: settings.radius },
             pos: ObjectPos {
                 current: pos,
                 old: pos,
             },
+            density: ObjectDensity(settings.density),
             sprite: Sprite {
-                color: material.color(),
+                color: settings.color,
                 custom_size: Some(Vec2::ONE),
                 ..default()
             },
             transform: Transform {
                 translation: Vec3::new(pos.x as f32, pos.y as f32, 0.0),
-                scale: Vec3::splat(radius as f32 * 2.0),
+                scale: Vec3::splat(settings.radius as f32 * 2.0),
                 ..default()
             },
             texture: image,
@@ -94,14 +72,14 @@ pub struct PhysObject {
     pub(super) mass: f64,
 }
 
-impl From<(&Object, &ObjectPos)> for PhysObject {
-    fn from((obj, pos): (&Object, &ObjectPos)) -> Self {
+impl From<(&Object, &ObjectPos, &ObjectDensity)> for PhysObject {
+    fn from((obj, pos, density): (&Object, &ObjectPos, &ObjectDensity)) -> Self {
         PhysObject {
             pos: pos.current,
             pos_old: pos.old,
             acceleration: DVec2::ZERO,
             radius: obj.radius,
-            mass: obj.radius * obj.radius * obj.material.density() * std::f64::consts::PI,
+            mass: obj.radius * obj.radius * density.0 * std::f64::consts::PI,
         }
     }
 }
@@ -114,24 +92,38 @@ impl PhysObject {
 
     #[inline(always)]
     pub fn update_position(&mut self, dt: f64) {
-        let velocity = if !self.pos.is_finite() {
-            if self.pos_old.is_finite() {
-                self.pos = self.pos_old;
-            } else {
-                self.pos = DVec2::ZERO;
-            }
-            DVec2::ZERO
-        } else {
-            self.pos - self.pos_old
-        };
+        #[cfg(feature = "panic-nan")]
+        self.panic_nan("pre update");
+        let velocity = self.pos - self.pos_old;
         self.pos_old = self.pos;
         self.pos += velocity + self.acceleration * dt * dt;
         self.acceleration = DVec2::ZERO;
+        #[cfg(feature = "panic-nan")]
+        self.panic_nan("post update");
+    }
+
+    
+    #[inline(always)]
+    pub fn set_velocity(&mut self, vel: DVec2) {
+        self.pos_old = self.pos - vel;
     }
 
     #[inline(always)]
     pub fn accelerate(&mut self, acc: DVec2) {
         self.acceleration += acc;
+    }
+
+    #[cfg(feature = "panic-nan")]
+    pub fn panic_nan(&self, msg: &str) {
+        if self.acceleration.is_nan() {
+            panic!("{} NAN acceleration", msg);
+        }
+        if self.pos.is_nan() {
+            panic!("{} NAN position", msg);
+        }
+        if self.pos_old.is_nan() {
+            panic!("{} NAN position_old", msg);
+        }
     }
 }
 
@@ -155,7 +147,7 @@ pub(super) fn update_visuals_system(
     #[cfg(feature = "tracy")]
     profiling::scope!("update visuals system");
     objects.for_each_mut(|(obj, mut transform, mut sprite)| {
-        sprite.color = obj.material.color();
+        sprite.color = obj.color;
         transform.scale = Vec3::splat(obj.radius as f32 * 2.0);
     });
 }

@@ -21,3 +21,4 @@ massi = { path = "../math/massi", optional = true }
 default = ["math"]
 tracy = ["profiling", "profiling/profile-with-tracy"]
 math = ["massi/cranelift"]
+panic-nan = []

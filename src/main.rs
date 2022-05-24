@@ -1,7 +1,9 @@
-#![feature(let_chains)]
+#![feature(let_chains, generic_associated_types)]
 mod for_pairs;
 mod physics;
 mod ui;
+
+use std::f64::consts::{FRAC_PI_2, TAU};
 
 use bevy::{
     diagnostic::FrameTimeDiagnosticsPlugin,
@@ -10,10 +12,10 @@ use bevy::{
 };
 use bevy_egui::EguiPlugin;
 use bevy_pancam::{PanCam, PanCamPlugin};
-use physics::{Material, Object, ObjectPos, PhysSettings, PhysicsPlugin};
+use physics::{Object, ObjectPos, PhysSettings, PhysicsPlugin};
 use rand::Rng;
 
-use crate::physics::{Gravity, LinkConstraint, ObjectBundle, PointConstraint};
+use crate::physics::{LinkConstraint, ObjectBundle, PointConstraint};
 
 fn main() {
     App::new()
@@ -23,6 +25,11 @@ fn main() {
         .add_plugin(PanCamPlugin)
         .add_plugin(PhysicsPlugin)
         .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(PlacementSettings {
+            radius: 4.0,
+            color: Color::WHITE,
+            density: 1.0,
+        })
         .add_startup_system(load_system)
         .add_system(input_system)
         .add_system(ui::ui)
@@ -47,9 +54,16 @@ struct Chain {
     points: Vec<(f64, DVec2)>,
 }
 
+pub struct PlacementSettings {
+    radius: f64,
+    color: Color,
+    density: f64,
+}
+
 fn input_system(
     mut commands: Commands,
-    mut settings: ResMut<PhysSettings>,
+    settings: ResMut<PhysSettings>,
+    placement: Res<PlacementSettings>,
     objects: Query<(Entity, &ObjectPos, &Object)>,
     input: Res<Input<KeyCode>>,
     windows: Res<Windows>,
@@ -69,12 +83,35 @@ fn input_system(
             .as_dvec2();
             let mut rng = rand::thread_rng();
             if input.pressed(KeyCode::Space) {
-                let radius = rng.gen_range(4.0..10.0);
-                if objects.iter().all(|(_, p, o)| {
-                    let r = radius + o.radius;
+                let pos = if settings.collisions && input.pressed(KeyCode::LControl) {
+                    let mut moved = false;
+                    let mut pos = pos;
+                    let mut last_angle: Option<f64> = None;
+                    for _ in 0..10 {
+                        pos = objects.iter().fold(pos, |pos, (_, p, o)| {
+                            let r = placement.radius + o.radius;
+                            if pos.distance_squared(p.current) < r * r {
+                                moved = true;
+                                let a = if let Some(last_angle) = last_angle { last_angle + rng.gen_range(-FRAC_PI_2*1.1..FRAC_PI_2*1.1) } else {rng.gen_range(0.0..TAU)};
+                                last_angle = Some(a);
+                                p.current + DVec2::new(a.cos(), a.sin()) * r
+                            } else {
+                                pos
+                            }
+                        });
+                        if !moved {
+                            break;
+                        }
+                    }
+                    pos
+                } else {
+                    pos
+                };
+                if !settings.collisions || objects.iter().all(|(_, p, o)| {
+                    let r = placement.radius + o.radius;
                     p.current.distance_squared(pos) > r * r
                 }) {
-                    commands.spawn_bundle(ObjectBundle::new(pos, Material::Metal, radius, circle.0.clone()));
+                    commands.spawn_bundle(ObjectBundle::new(pos, &placement, circle.0.clone()));
                 }
             }
             if input.pressed(KeyCode::Q) {
@@ -83,9 +120,6 @@ fn input_system(
                 }).map(|(e, _, _)| {
                     commands.entity(e).despawn();
                 });
-            }
-            if input.just_pressed(KeyCode::B) {
-                commands.spawn_bundle(ObjectBundle::new(pos, Material::Wood, rng.gen_range(400.0..1000.0), circle.0.clone()));
             }
 
             if input.just_pressed(KeyCode::C) {
@@ -105,7 +139,7 @@ fn input_system(
             if let Some(chain) = &mut *chain_builder {
                 let last_pos = chain.points.last().map(|(_, p)| *p).or_else(|| chain.start);
                 let distance = last_pos.map(|p| (pos - p).length()).unwrap_or(f64::INFINITY);
-                let chain_distance = 6.5;
+                let chain_distance = placement.radius * 1.95;
                 if distance > chain_distance {
                     if let Some(last) = last_pos {
                         let inbetween = (distance / chain_distance - 1.0) as u32;
@@ -121,49 +155,26 @@ fn input_system(
                     }
                 }
                 if input.just_released(KeyCode::C) {
-                    let chain_obj = |pos| ObjectBundle::new(pos, Material::Metal, 3.0, circle.0.clone());
+                    let chain_obj = |pos| ObjectBundle::new(pos, &placement, circle.0.clone());
                     let mut last = chain.start.map(|p| {
                         let id = commands.spawn_bundle(chain_obj(p)).id();
-                        commands.spawn().insert(PointConstraint {
-                            a: id,
-                            dist: 0.0,
-                            point: p,
-                        });
+                        commands.spawn().insert(PointConstraint::new(id, p, 0.0));
                         id
                     });
                     let mut last_l = None;
                     for (dist, p) in &chain.points {
                         let id = commands.spawn_bundle(chain_obj(*p)).id();
                         if let Some(last) = last {
-                            commands.spawn().insert(LinkConstraint {
-                                a: last,
-                                b: id,
-                                dist: *dist,
-                                snap: *dist * 10.0,
-                            });
+                            commands.spawn().insert(LinkConstraint::new(last, id, *dist * 1.01, *dist * 10.0));
                         }
                         last = Some(id);
                         last_l = Some((id, *p));
                     }
                     if let Some((last, p)) = last_l && input.pressed(KeyCode::LControl) {
-                        commands.spawn().insert(PointConstraint {
-                            a: last,
-                            dist: 0.0,
-                            point: p,
-                        });
+                        commands.spawn().insert(PointConstraint::new(last, p, 0.0));
                     }
                     *chain_builder = None;
                 }
-            }
-            if input.pressed(KeyCode::G) {
-                settings.gravity = Gravity::Towards {
-                    point: pos,
-                    strength: if let Gravity::Towards { point: _, strength } = settings.gravity {
-                        strength
-                    } else {
-                        400.0
-                    },
-                };
             }
         }
     }
