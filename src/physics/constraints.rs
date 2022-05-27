@@ -1,13 +1,13 @@
 use std::ops::IndexMut;
 
-use bevy::{math::DVec2, prelude::*};
+use bevy::{math::Vec2, prelude::*};
 
 use super::PhysObject;
 
 pub trait Constraint<E> {
     type This<U>;
     fn apply<'a, C: IndexMut<E, Output = PhysObject>>(&self, get: &mut C);
-    fn should_stay<F: Fn(&E) -> DVec2>(&self, get: F) -> bool;
+    fn should_stay<F: Fn(&E) -> Vec2>(&self, get: F) -> bool;
     fn try_map<T, F: FnMut(&E) -> Option<T>>(&self, map: F) -> Option<Self::This<T>>;
 }
 
@@ -15,18 +15,13 @@ pub trait Constraint<E> {
 pub struct LinkConstraint<E> {
     a: E,
     b: E,
-    dist: f64,
-    snap: f64,
+    dist: f32,
+    snap: f32,
 }
 
 impl LinkConstraint<Entity> {
-    pub fn new(a: Entity, b: Entity, dist: f64, snap: f64) -> Self {
-        Self {
-            a,
-            b,
-            dist,
-            snap,
-        }
+    pub fn new(a: Entity, b: Entity, dist: f32, snap: f32) -> Self {
+        Self { a, b, dist, snap }
     }
 }
 
@@ -35,8 +30,8 @@ impl<E: Copy> Constraint<E> for LinkConstraint<E> {
 
     fn apply<'a, C: IndexMut<E, Output = PhysObject>>(&self, get: &mut C) {
         let axis = get[self.a].pos - get[self.b].pos;
-        let axis = if axis == DVec2::ZERO {
-            DVec2::new(f64::EPSILON, f64::EPSILON)
+        let axis = if axis == Vec2::ZERO {
+            Vec2::new(f32::EPSILON, f32::EPSILON)
         } else {
             axis
         };
@@ -65,7 +60,7 @@ impl<E: Copy> Constraint<E> for LinkConstraint<E> {
         })
     }
 
-    fn should_stay<F: Fn(&E) -> DVec2>(&self, get: F) -> bool {
+    fn should_stay<F: Fn(&E) -> Vec2>(&self, get: F) -> bool {
         get(&self.a).distance_squared(get(&self.b)) < self.snap * self.snap
     }
 }
@@ -73,8 +68,8 @@ impl<E: Copy> Constraint<E> for LinkConstraint<E> {
 #[derive(Component)]
 pub struct PointConstraint<E> {
     a: E,
-    dist: f64,
-    point: DVec2,
+    dist: f32,
+    point: Vec2,
 }
 
 impl<E> PointConstraint<E> {
@@ -88,12 +83,8 @@ impl<E> PointConstraint<E> {
 }
 
 impl PointConstraint<Entity> {
-    pub fn new(a: Entity, point: DVec2, dist: f64) -> Self {
-        Self {
-            a,
-            point,
-            dist,
-        }
+    pub fn new(a: Entity, point: Vec2, dist: f32) -> Self {
+        Self { a, point, dist }
     }
 }
 
@@ -101,16 +92,16 @@ impl<E: Copy> Constraint<E> for PointConstraint<E> {
     type This<U> = PointConstraint<U>;
 
     fn apply<'a, C: IndexMut<E, Output = PhysObject>>(&self, get: &mut C) {
-            let axis = get[self.a].pos - self.point;
-            let dist = axis.length();
-            let n = axis / dist;
-            let delta = self.dist - dist;
-            let p = self.point + n * delta;
-            get[self.a].pos = p;
-            get[self.a].pos_old = p;
-            get[self.a].acceleration = DVec2::ZERO;
-            #[cfg(feature = "panic-nan")]
-            get[self.a].panic_nan("point");
+        let axis = get[self.a].pos - self.point;
+        let dist = axis.length();
+        let n = axis / dist;
+        let delta = self.dist - dist;
+        let p = self.point + n * delta;
+        get[self.a].pos = p;
+        get[self.a].pos_old = p;
+        get[self.a].acceleration = Vec2::ZERO;
+        #[cfg(feature = "panic-nan")]
+        get[self.a].panic_nan("point");
     }
 
     fn try_map<T, F: FnMut(&E) -> Option<T>>(&self, mut map: F) -> Option<Self::This<T>> {
@@ -121,7 +112,7 @@ impl<E: Copy> Constraint<E> for PointConstraint<E> {
         })
     }
 
-    fn should_stay<F: Fn(&E) -> DVec2>(&self, _: F) -> bool {
+    fn should_stay<F: Fn(&E) -> Vec2>(&self, _: F) -> bool {
         true
     }
 }

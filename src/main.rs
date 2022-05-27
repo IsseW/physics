@@ -1,13 +1,21 @@
-#![feature(let_chains, generic_associated_types)]
+#![allow(incomplete_features)]
+#![feature(
+    let_chains,
+    generic_associated_types,
+    maybe_uninit_uninit_array,
+    maybe_uninit_array_assume_init,
+    stdsimd,
+    generic_const_exprs
+)]
 mod for_pairs;
 mod physics;
 mod ui;
 
-use std::f64::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::{FRAC_PI_2, TAU};
 
 use bevy::{
     diagnostic::FrameTimeDiagnosticsPlugin,
-    math::{DVec2, Vec3Swizzles, Vec4Swizzles},
+    math::{Vec2, Vec3Swizzles, Vec4Swizzles},
     prelude::*,
 };
 use bevy_egui::EguiPlugin;
@@ -50,14 +58,14 @@ fn load_system(mut commands: Commands, asset_server: Res<AssetServer>) {
 struct Circle(Handle<Image>);
 
 struct Chain {
-    start: Option<DVec2>,
-    points: Vec<(f64, DVec2)>,
+    start: Option<Vec2>,
+    points: Vec<(f32, Vec2)>,
 }
 
 pub struct PlacementSettings {
-    radius: f64,
+    radius: f32,
     color: Color,
-    density: f64,
+    density: f32,
 }
 
 fn input_system(
@@ -79,14 +87,13 @@ fn input_system(
             let position = (position / Vec2::new(window.width(), window.height()) - 0.5) * 2.0;
             let pos = transform.mul_vec3((camera.projection_matrix.inverse()
                 * Vec4::new(position.x, position.y, 0.0, 1.0)).xyz())
-            .xy()
-            .as_dvec2();
+            .xy();
             let mut rng = rand::thread_rng();
             if input.pressed(KeyCode::Space) {
                 let pos = if settings.collisions && input.pressed(KeyCode::LControl) {
                     let mut moved = false;
                     let mut pos = pos;
-                    let mut last_angle: Option<f64> = None;
+                    let mut last_angle: Option<f32> = None;
                     for _ in 0..10 {
                         pos = objects.iter().fold(pos, |pos, (_, p, o)| {
                             let r = placement.radius + o.radius;
@@ -94,7 +101,7 @@ fn input_system(
                                 moved = true;
                                 let a = if let Some(last_angle) = last_angle { last_angle + rng.gen_range(-FRAC_PI_2*1.1..FRAC_PI_2*1.1) } else {rng.gen_range(0.0..TAU)};
                                 last_angle = Some(a);
-                                p.current + DVec2::new(a.cos(), a.sin()) * r
+                                p.current + Vec2::new(a.cos(), a.sin()) * r
                             } else {
                                 pos
                             }
@@ -138,14 +145,14 @@ fn input_system(
 
             if let Some(chain) = &mut *chain_builder {
                 let last_pos = chain.points.last().map(|(_, p)| *p).or_else(|| chain.start);
-                let distance = last_pos.map(|p| (pos - p).length()).unwrap_or(f64::INFINITY);
+                let distance = last_pos.map(|p| (pos - p).length()).unwrap_or(f32::INFINITY);
                 let chain_distance = placement.radius * 1.95;
                 if distance > chain_distance {
                     if let Some(last) = last_pos {
                         let inbetween = (distance / chain_distance - 1.0) as u32;
-                        let distance = distance / (inbetween + 1) as f64;
+                        let distance = distance / (inbetween + 1) as f32;
                         for i in 0..inbetween {
-                            let t = i as f64 / (inbetween + 1) as f64;
+                            let t = i as f32 / (inbetween + 1) as f32;
                             let p = last * (1.0 - t) + pos * t;
                             chain.points.push((distance, p));
                         }

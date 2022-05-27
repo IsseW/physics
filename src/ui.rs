@@ -2,9 +2,11 @@ use std::num::NonZeroU32;
 
 use bevy::{
     diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
-    math::DVec2,
+    math::Vec2,
     prelude::*,
 };
+#[cfg(feature = "math")]
+use bevy_egui::egui::Rgba;
 use bevy_egui::{
     egui::{self, panel::Side},
     EguiContext,
@@ -15,10 +17,11 @@ use massi::{
     parser::{Error, Full},
     Expr, Identifier,
 };
-#[cfg(feature = "math")]
-use bevy_egui::egui::Rgba;
 
-use crate::{physics::{Bounds, Gravity, LinkConstraint, ObjectPos, PhysSettings, PointConstraint}, PlacementSettings};
+use crate::{
+    physics::{Bounds, Gravity, LinkConstraint, ObjectPos, PhysSettings, PointConstraint},
+    PlacementSettings,
+};
 
 #[cfg(feature = "math")]
 enum ExprRes {
@@ -58,14 +61,14 @@ pub fn ui(
 ) {
     #[cfg(feature = "tracy")]
     profiling::scope!("ui system");
-    fn scalar(ui: &mut egui::Ui, label: &str, v: &mut f64) {
+    fn scalar(ui: &mut egui::Ui, label: &str, v: &mut f32) {
         ui.horizontal(|ui| {
             ui.label(label);
             ui.add(egui::DragValue::new(v));
         });
     }
 
-    fn vector(ui: &mut egui::Ui, label: &str, v: &mut DVec2) {
+    fn vector(ui: &mut egui::Ui, label: &str, v: &mut Vec2) {
         ui.horizontal(|ui| {
             ui.label(label);
             ui.add(egui::DragValue::new(&mut v.x));
@@ -247,7 +250,7 @@ pub fn ui(
         color_edit(ui, &mut placement.color);
 
         ui.heading("Info");
-        
+
         ui.label(format!("Bodies: {}", objects.iter().count()));
         ui.label(format!("Links: {}", links.iter().count()));
 
@@ -257,5 +260,7 @@ pub fn ui(
         if let Some(fps) = fps_diags {
             ui.label(format!("FPS: {:.0}", fps));
         }
+
+        ui.checkbox(&mut settings.use_simd, "Simd");
     });
 }

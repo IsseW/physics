@@ -1,14 +1,14 @@
-use bevy::{math::DVec2, prelude::*};
+use bevy::{math::Vec2, prelude::*};
 
 use crate::PlacementSettings;
 
 #[derive(Component)]
-pub struct ObjectDensity(f64);
+pub struct ObjectDensity(pub f32);
 
 #[derive(Component)]
 pub struct ObjectPos {
-    pub current: DVec2,
-    pub old: DVec2,
+    pub current: Vec2,
+    pub old: Vec2,
 }
 
 impl ObjectPos {
@@ -21,7 +21,7 @@ impl ObjectPos {
 #[derive(Component)]
 pub struct Object {
     pub color: Color,
-    pub radius: f64,
+    pub radius: f32,
 }
 
 #[derive(Bundle)]
@@ -38,9 +38,12 @@ pub struct ObjectBundle {
 }
 
 impl ObjectBundle {
-    pub fn new(pos: DVec2, settings: &PlacementSettings, image: Handle<Image>) -> Self {
+    pub fn new(pos: Vec2, settings: &PlacementSettings, image: Handle<Image>) -> Self {
         Self {
-            object: Object { color: settings.color, radius: settings.radius },
+            object: Object {
+                color: settings.color,
+                radius: settings.radius,
+            },
             pos: ObjectPos {
                 current: pos,
                 old: pos,
@@ -65,11 +68,11 @@ impl ObjectBundle {
 
 #[derive(Clone)]
 pub struct PhysObject {
-    pub(super) pos: DVec2,
-    pub(super) pos_old: DVec2,
-    pub(super) acceleration: DVec2,
-    pub(super) radius: f64,
-    pub(super) mass: f64,
+    pub(super) pos: Vec2,
+    pub(super) pos_old: Vec2,
+    pub(super) acceleration: Vec2,
+    pub(super) radius: f32,
+    pub(super) mass: f32,
 }
 
 impl From<(&Object, &ObjectPos, &ObjectDensity)> for PhysObject {
@@ -77,9 +80,9 @@ impl From<(&Object, &ObjectPos, &ObjectDensity)> for PhysObject {
         PhysObject {
             pos: pos.current,
             pos_old: pos.old,
-            acceleration: DVec2::ZERO,
+            acceleration: Vec2::ZERO,
             radius: obj.radius,
-            mass: obj.radius * obj.radius * density.0 * std::f64::consts::PI,
+            mass: obj.radius * obj.radius * density.0 * std::f32::consts::PI,
         }
     }
 }
@@ -91,25 +94,24 @@ impl PhysObject {
     }
 
     #[inline(always)]
-    pub fn update_position(&mut self, dt: f64) {
+    pub fn update_position(&mut self, dt: f32) {
         #[cfg(feature = "panic-nan")]
         self.panic_nan("pre update");
         let velocity = self.pos - self.pos_old;
         self.pos_old = self.pos;
         self.pos += velocity + self.acceleration * dt * dt;
-        self.acceleration = DVec2::ZERO;
+        self.acceleration = Vec2::ZERO;
         #[cfg(feature = "panic-nan")]
         self.panic_nan("post update");
     }
 
-    
     #[inline(always)]
-    pub fn set_velocity(&mut self, vel: DVec2) {
+    pub fn set_velocity(&mut self, vel: Vec2) {
         self.pos_old = self.pos - vel;
     }
 
     #[inline(always)]
-    pub fn accelerate(&mut self, acc: DVec2) {
+    pub fn accelerate(&mut self, acc: Vec2) {
         self.acceleration += acc;
     }
 
