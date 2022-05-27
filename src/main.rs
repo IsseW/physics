@@ -1,4 +1,11 @@
-#![feature(let_chains)]
+#![allow(incomplete_features)]
+#![feature(
+    let_chains,
+    maybe_uninit_uninit_array,
+    maybe_uninit_array_assume_init,
+    stdsimd,
+    generic_const_exprs,
+)]
 mod for_pairs;
 mod physics;
 mod ui;
