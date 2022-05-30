@@ -1039,6 +1039,7 @@ dependencies = [
 [[package]]
 name = "compiler"
 version = "0.1.0"
+source = "git+https://github.com/IsseW/math#14bc92f79ac3bbbbb75ca69b2ffc3b066037a026"
 dependencies = [
  "anyhow",
  "cranelift-codegen",
@@ -1959,6 +1960,7 @@ dependencies = [
 [[package]]
 name = "interpreter"
 version = "0.1.0"
+source = "git+https://github.com/IsseW/math#14bc92f79ac3bbbbb75ca69b2ffc3b066037a026"
 dependencies = [
  "itertools",
  "num",
@@ -2170,6 +2172,7 @@ dependencies = [
 [[package]]
 name = "massi"
 version = "0.1.0"
+source = "git+https://github.com/IsseW/math#14bc92f79ac3bbbbb75ca69b2ffc3b066037a026"
 dependencies = [
  "compiler",
  "interpreter",

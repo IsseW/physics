@@ -15,7 +15,7 @@ bevy_egui = "0.14"
 
 profiling = { version = "1.0.1", default-features = false, optional = true }
 
-massi = { path = "../math/massi", optional = true }
+massi = { git = "https://github.com/IsseW/math", optional = true }
 
 [features]
 default = ["math"]
