@@ -1,4 +1,4 @@
-#![feature(let_chains, generic_associated_types)]
+#![feature(let_chains)]
 mod for_pairs;
 mod physics;
 mod ui;
